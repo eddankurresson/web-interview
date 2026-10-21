@@ -1,75 +1,167 @@
-import React, { Fragment, useState, useEffect } from 'react'
+import React, { useState } from 'react'
 import {
+  Alert,
+  Button,
   Card,
   CardContent,
+  Chip,
+  CircularProgress,
   List,
   ListItemButton,
   ListItemText,
-  ListItemIcon,
   Typography,
 } from '@mui/material'
-import ReceiptIcon from '@mui/icons-material/Receipt'
 import { TodoListForm } from './TodoListForm'
-
-// Simulate network
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
-
-const fetchTodoLists = () => {
-  return sleep(1000).then(() =>
-    Promise.resolve({
-      '0000000001': {
-        id: '0000000001',
-        title: 'First List',
-        todos: ['First todo of first list!'],
-      },
-      '0000000002': {
-        id: '0000000002',
-        title: 'Second List',
-        todos: ['First todo of second list!'],
-      },
-    })
-  )
-}
+import { useTodoLists } from '../useTodoLists'
+import { useUnsavedChangesWarning } from '../useUnsavedChangesWarning'
+import { isListCompleted, areTodosEqual } from '../utils'
 
 export const TodoLists = ({ style }) => {
-  const [todoLists, setTodoLists] = useState({})
-  const [activeList, setActiveList] = useState()
+  const {
+    lists,
+    loading: isLoading,
+    saving: isSaving,
+    error: loadError,
+    saveList,
+    createList,
+    renameList,
+    deleteList,
+    retry: retryLoadingLists,
+  } = useTodoLists()
+  const [listActionError, setListActionError] = useState('')
+  const [activeListId, setActiveListId] = useState()
+  const [draftTodos, setDraftTodos] = useState([])
+  const selectedList = lists.find((list) => list.id === activeListId)
+  const hasUnsavedChanges = selectedList ? !areTodosEqual(draftTodos, selectedList.todos) : false
 
-  useEffect(() => {
-    fetchTodoLists().then(setTodoLists)
-  }, [])
+  useUnsavedChangesWarning(hasUnsavedChanges)
 
-  if (!Object.keys(todoLists).length) return null
+  const confirmDiscardChanges = () => {
+    if (!hasUnsavedChanges) return true
+    return window.confirm('Discard unsaved changes?')
+  }
+
+  const selectList = (listId) => {
+    const isAlreadySelected = listId === activeListId
+    if (isAlreadySelected || isSaving) return
+    if (!confirmDiscardChanges()) return
+
+    const nextList = lists.find((list) => list.id === listId)
+    if (!nextList) return
+
+    setDraftTodos(nextList.todos)
+    setActiveListId(listId)
+  }
+  const askForListName = (currentTitle = '') => {
+    const enteredTitle = window.prompt('List name:', currentTitle)
+    if (enteredTitle === null) return null
+    const title = enteredTitle.trim()
+    if (!title) {
+      setListActionError('Enter a list name.')
+      return null
+    }
+    return title
+  }
+
+  const handleCreateList = async () => {
+    if (isSaving) return
+    setListActionError('')
+    const title = askForListName()
+    if (!title || !confirmDiscardChanges()) return
+    try {
+      const createdList = await createList(title)
+      setDraftTodos(createdList.todos)
+      setActiveListId(createdList.id)
+    } catch (error) {
+      setListActionError(error.message)
+    }
+  }
+
+  const handleRenameList = async () => {
+    if (isSaving || !selectedList) return
+    setListActionError('')
+    const title = askForListName(selectedList.title)
+    if (!title || title === selectedList.title) return
+    try {
+      await renameList(selectedList.id, title)
+    } catch (error) {
+      setListActionError(error.message)
+    }
+  }
+
+  const handleDeleteList = async () => {
+    if (isSaving || !selectedList) return
+    const warning = `Delete "${selectedList.title}" and all its tasks? Unsaved changes will also be lost.`
+    if (!window.confirm(warning)) return
+    setListActionError('')
+    try {
+      await deleteList(selectedList.id)
+      setActiveListId(undefined)
+      setDraftTodos([])
+    } catch (error) {
+      setListActionError(error.message)
+    }
+  }
+
+  if (isLoading) return <CircularProgress aria-label='Loading lists' sx={{ m: 2 }} />
+  if (loadError)
+    return (
+      <Alert
+        severity='error'
+        sx={{ m: 2 }}
+        action={
+          <Button color='inherit' onClick={retryLoadingLists}>
+            Try again
+          </Button>
+        }
+      >
+        {loadError}
+      </Alert>
+    )
+
   return (
-    <Fragment>
+    <>
       <Card style={style}>
         <CardContent>
           <Typography component='h2'>My Todo Lists</Typography>
+          <Button disabled={isSaving} onClick={handleCreateList}>New list</Button>
+          {selectedList && (
+            <>
+              <Button disabled={isSaving} onClick={handleRenameList}>Rename selected list</Button>
+              <Button disabled={isSaving} color='error' onClick={handleDeleteList}>
+                Delete selected list
+              </Button>
+            </>
+          )}
+          {listActionError && <Alert severity='error'>{listActionError}</Alert>}
           <List>
-            {Object.keys(todoLists).map((key) => (
-              <ListItemButton key={key} onClick={() => setActiveList(key)}>
-                <ListItemIcon>
-                  <ReceiptIcon />
-                </ListItemIcon>
-                <ListItemText primary={todoLists[key].title} />
+            {lists.map((list) => (
+              <ListItemButton
+                key={list.id}
+                selected={activeListId === list.id}
+                disabled={isSaving}
+                onClick={() => selectList(list.id)}
+              >
+                <ListItemText primary={list.title} />
+                {isListCompleted(list.todos) && (
+                  <Chip label='Completed' color='success' size='small' />
+                )}
               </ListItemButton>
             ))}
           </List>
+          {lists.length === 0 && <Typography>No lists available.</Typography>}
         </CardContent>
       </Card>
-      {todoLists[activeList] && (
+      {selectedList && (
         <TodoListForm
-          key={activeList} // use key to make React recreate component to reset internal state
-          todoList={todoLists[activeList]}
-          saveTodoList={(id, { todos }) => {
-            const listToUpdate = todoLists[id]
-            setTodoLists({
-              ...todoLists,
-              [id]: { ...listToUpdate, todos },
-            })
-          }}
+          key={selectedList.id}
+          todoList={selectedList}
+          todos={draftTodos}
+          onTodosChange={setDraftTodos}
+          saveTodoList={saveList}
+          isSaving={isSaving}
         />
       )}
-    </Fragment>
+    </>
   )
 }
